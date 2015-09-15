@@ -1,9 +1,8 @@
 package main
 
 import (
-	"bufio"
 	"fmt"
-	"os"
+	"github.com/ActiveState/tail"
 	"regexp"
 	"strings"
 	"time"
@@ -16,7 +15,7 @@ type Client struct {
 }
 
 func periodicFree() {
-	for _ = range time.Tick(5 * time.Second) {
+	for _ = range time.Tick(30 * time.Second) {
 		dump()
 	}
 }
@@ -24,31 +23,41 @@ func periodicFree() {
 var client_map = map[string]Client{}
 var host_map = map[string]string{}
 
-var re = regexp.MustCompile("hostapd: ([a-z]+[0-9]+[-]*[0-9]*): STA (?i)(([0-9A-F]{2}[:-]){5}([0-9A-F]{2}))")
+var re = regexp.MustCompile("(.*) (.*) hostapd: ([a-z]+[0-9]+[-]*[0-9]*): STA (?i)(([0-9A-F]{2}[:-]){5}([0-9A-F]{2}))")
 var reHosts = regexp.MustCompile("((?i)([0-9A-F]{2}[:-]){5}(?i)([0-9A-F]{2})) (.*)$")
 
-func connected(mac, wlan string) {
-	disconnected(mac, wlan)
-	client_map[mac] = Client{time.Now(), wlan, mac}
-	fmt.Printf("Connected: %s %s\n", wlan, mac)
+func parseDate(str string) time.Time {
+	t, err := time.Parse(time.RFC3339, str)
+	if err != nil {
+		fmt.Println(err)
+		return time.Now()
+	}
+	return t
 }
 
-func disconnected(mac, wlan string) {
-	if _, ok := client_map[mac]; ok {
-		delete(client_map, mac)
-		fmt.Printf("Disconnected: %s %s\n", wlan, mac)
+func connected(mac string, wlan string, dt time.Time) {
+	disconnected(mac, wlan, dt)
+	client_map[mac+wlan] = Client{dt, wlan, mac}
+	fmt.Printf("%s [--->] %s %-15s\n", dt.Format(time.RFC822), wlanToHuman(wlan), getHostName(mac))
+}
+
+func disconnected(mac string, wlan string, dt time.Time) {
+	if _, ok := client_map[mac+wlan]; ok {
+		client := client_map[mac+wlan]
+		fmt.Printf("%s [<---] %s %-15s %s\n", dt.Format(time.RFC822), wlanToHuman(client.Wlan), getHostName(client.Mac), calcDate(client.Connect, dt))
+		delete(client_map, mac+wlan)
 	}
 }
 
-func parse(text string) (string, string) {
-	wlan, mac := "", ""
+func parse(text string) (string, string, time.Time) {
+	wlan, mac, str := "", "", ""
 	match := re.FindStringSubmatch(text)
 
-	if len(match) == 5 {
-		mac, wlan = match[2], match[1]
+	if len(match) == 7 {
+		mac, wlan, str = match[4], match[3], match[1]
 	}
 
-	return mac, wlan
+	return mac, wlan, parseDate(str)
 }
 
 func parseHost(text string) {
@@ -56,16 +65,19 @@ func parseHost(text string) {
 	if len(match) == 5 {
 		host := match[4]
 		mac := match[1]
-		fmt.Printf("match : %s -> %s\n", host, mac)
+
+		if len(host) == 0 {
+				return
+		}
 
 		if val, ok := host_map[mac]; ok {
 			if val != host {
 				host_map[mac] = host
-				fmt.Printf("host updated!\n")
+				// fmt.Printf("host updated!\n")
 			}
 		} else {
 			host_map[mac] = host
-			fmt.Printf("new host!\n")
+			//  fmt.Printf("new host : %s = %s !\n", mac, host)
 		}
 	}
 }
@@ -84,9 +96,11 @@ func wlanToHuman(wlan string) string {
 	return str
 }
 
-func calcDate(connect time.Time) string {
-	duration := time.Since(connect)
+func calcDate(connect, disconnect time.Time) string {
+	duration := disconnect.Sub(connect)
 	elapsed := int(duration.Seconds())
+
+	// fmt.Printf("duration %s %s %d !\n" , connect.Format(time.RFC822),disconnect.Format(time.RFC822), duration)
 
 	days := elapsed / 86400
 	elapsed = elapsed % 86400
@@ -110,37 +124,42 @@ func calcDate(connect time.Time) string {
 }
 
 func getHostName(mac string) string {
-	str := mac
 	if val, ok := host_map[mac]; ok {
-		str = val
+		return val
 	}
-	return str
+	return mac
 }
 
 func dump() {
-	fmt.Printf("DUMP\n")
 	for _, client := range client_map {
-		fmt.Printf("%s [-->] %s %-25s\n", calcDate(client.Connect), wlanToHuman(client.Wlan), getHostName(client.Mac))
+		fmt.Printf("%s [DUMP] %s %-15s %s\n",time.Now().Format(time.RFC822),  wlanToHuman(client.Wlan), getHostName(client.Mac),calcDate(client.Connect, time.Now()))
 	}
+}
+
+func readHostAp() {
+	t, err := tail.TailFile("/tmp/hostapd.log", tail.Config{Follow: true, ReOpen: true})
+	for line := range t.Lines {
+		if strings.Contains(line.Text, "deauthenticated") {
+			disconnected(parse(line.Text))
+		} else if strings.Contains(line.Text, "authenticated") {
+			connected(parse(line.Text))
+		}
+	}
+	fmt.Println(err)
+}
+
+func readDhcp() {
+	t, err := tail.TailFile("/tmp/dnsmasq-dhcp.log", tail.Config{Follow: true, ReOpen: true})
+	for line := range t.Lines {
+		if strings.Contains(line.Text, "DHCPACK") {
+			parseHost(line.Text)
+		}
+	}
+	fmt.Println(err)
 }
 
 func main() {
 	go periodicFree()
-
-	scanner := bufio.NewScanner(os.Stdin)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.Contains(line, "deauthenticated") {
-			disconnected(parse(line))
-		} else if strings.Contains(line, "authenticated") {
-			connected(parse(line))
-		} else if strings.Contains(line, "DHCPACK") {
-			parseHost(line)
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
-		os.Exit(1)
-	}
+	go readDhcp()
+	readHostAp()
 }
