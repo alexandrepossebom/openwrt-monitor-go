@@ -3,10 +3,19 @@ package main
 import (
 	"fmt"
 	"github.com/ActiveState/tail"
+	"io"
+	"net/http"
 	"regexp"
 	"strings"
 	"time"
 )
+
+type Log struct {
+	Dt       time.Time
+	Wlan     string
+	Mac      string
+	Duration string
+}
 
 type Client struct {
 	Connect time.Time
@@ -22,6 +31,7 @@ func periodicFree() {
 
 var client_map = map[string]Client{}
 var host_map = map[string]string{}
+var logs []Log
 
 var re = regexp.MustCompile("(.*) (.*) hostapd: ([a-z]+[0-9]+[-]*[0-9]*): STA (?i)(([0-9A-F]{2}[:-]){5}([0-9A-F]{2}))")
 var reHosts = regexp.MustCompile("((?i)([0-9A-F]{2}[:-]){5}(?i)([0-9A-F]{2})) (.*)$")
@@ -35,6 +45,11 @@ func parseDate(str string) time.Time {
 	return t
 }
 
+func lp(l Log) {
+		fmt.Printf("%s [--->] %s %-15s\n", l.Dt.Format(time.RFC822), l.Wlan, l.Mac)
+		logs = append(logs, l)	
+}
+
 func connected(mac string, wlan string, dt time.Time) {
 	disconnected(mac, wlan, dt)
 	client_map[mac+wlan] = Client{dt, wlan, mac}
@@ -44,7 +59,8 @@ func connected(mac string, wlan string, dt time.Time) {
 func disconnected(mac string, wlan string, dt time.Time) {
 	if _, ok := client_map[mac+wlan]; ok {
 		client := client_map[mac+wlan]
-		fmt.Printf("%s [<---] %s %-15s %s\n", dt.Format(time.RFC822), wlanToHuman(client.Wlan), getHostName(client.Mac), calcDate(client.Connect, dt))
+		l := Log{dt, wlanToHuman(client.Wlan), getHostName(client.Mac), calcDate(client.Connect, dt)}
+		lp(l)
 		delete(client_map, mac+wlan)
 	}
 }
@@ -67,7 +83,7 @@ func parseHost(text string) {
 		mac := match[1]
 
 		if len(host) == 0 {
-				return
+			return
 		}
 
 		if val, ok := host_map[mac]; ok {
@@ -132,7 +148,7 @@ func getHostName(mac string) string {
 
 func dump() {
 	for _, client := range client_map {
-		fmt.Printf("%s [DUMP] %s %-15s %s\n",time.Now().Format(time.RFC822),  wlanToHuman(client.Wlan), getHostName(client.Mac),calcDate(client.Connect, time.Now()))
+		fmt.Printf("%s [DUMP] %s %-15s %s\n", time.Now().Format(time.RFC822), wlanToHuman(client.Wlan), getHostName(client.Mac), calcDate(client.Connect, time.Now()))
 	}
 }
 
@@ -158,8 +174,96 @@ func readDhcp() {
 	fmt.Println(err)
 }
 
+func hello(w http.ResponseWriter, r *http.Request) {
+
+	io.WriteString(w, "<!DOCTYPE html>")
+	io.WriteString(w, "<html lang=\"en\">")
+	io.WriteString(w, "<head>")
+	io.WriteString(w, "<title>Wifi Stats</title>")
+	io.WriteString(w, "<meta charset=\"utf-8\">")
+	io.WriteString(w, "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">")
+	io.WriteString(w, "<link rel=\"stylesheet\" href=\"http://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/css/bootstrap.min.css\">")
+	io.WriteString(w, "<script src=\"https://ajax.googleapis.com/ajax/libs/jquery/1.11.3/jquery.min.js\"></script>")
+	io.WriteString(w, "<script src=\"http://maxcdn.bootstrapcdn.com/bootstrap/3.3.5/js/bootstrap.min.js\"></script>")
+	io.WriteString(w, "</head>")
+	io.WriteString(w, "<body>")
+
+	io.WriteString(w, "<div class=\"container\">")
+
+
+	io.WriteString(w, "<h2>Hosts connected</h2>")
+	io.WriteString(w, "<table class=\"table\">")
+	io.WriteString(w, "<thead>")
+	io.WriteString(w, "<tr>")
+	io.WriteString(w, "<th>Date</th>")
+	io.WriteString(w, "<th>Interface</th>")
+	io.WriteString(w, "<th>Hostname</th>")
+	io.WriteString(w, "<th>Duration</th>")
+	io.WriteString(w, "</tr>")
+	io.WriteString(w, "</thead>")
+	io.WriteString(w, "<tbody>")
+
+
+		for _, client := range client_map {
+
+		io.WriteString(w, "<tr>")
+		t := time.Now()
+		strTime := fmt.Sprintf("%d/%d %d:%d", t.Day(), t.Month(), t.Hour(), t.Minute())
+		io.WriteString(w, "<td>"+strTime+"</td>")
+		io.WriteString(w, "<td>"+wlanToHuman(client.Wlan)+"</td>")
+		io.WriteString(w, "<td>"+getHostName(client.Mac)+"</td>")
+		io.WriteString(w, "<td>"+calcDate(client.Connect, time.Now())+"</td>")
+		io.WriteString(w, "</tr>")
+	}
+
+	io.WriteString(w, "</tbody>")
+	io.WriteString(w, "</table>")
+
+
+
+
+	io.WriteString(w, "<h2>Hosts history</h2>")
+	io.WriteString(w, "<table class=\"table\">")
+	io.WriteString(w, "<thead>")
+	io.WriteString(w, "<tr>")
+	io.WriteString(w, "<th>Date</th>")
+	io.WriteString(w, "<th>Action</th>")
+	io.WriteString(w, "<th>Interface</th>")
+	io.WriteString(w, "<th>Hostname</th>")
+	io.WriteString(w, "<th>Duration</th>")
+	io.WriteString(w, "</tr>")
+	io.WriteString(w, "</thead>")
+	io.WriteString(w, "<tbody>")
+
+	for _, l := range logs {
+		io.WriteString(w, "<tr>")
+		strTime := fmt.Sprintf("%d/%d %d:%d", l.Dt.Day(), l.Dt.Month(), l.Dt.Hour(), l.Dt.Minute())
+		io.WriteString(w, "<td>"+strTime+"</td>")
+		if len(l.Duration) > 0 {
+			io.WriteString(w, "<td>[<--]</td>")
+		} else {
+			io.WriteString(w, "<td>[-->]</td>")
+		}
+		io.WriteString(w, "<td>"+l.Wlan+"</td>")
+		io.WriteString(w, "<td>"+l.Mac+"</td>")
+		io.WriteString(w, "<td>"+l.Duration+"</td>")
+		io.WriteString(w, "</tr>")
+	}
+
+	io.WriteString(w, "</tbody>")
+	io.WriteString(w, "</table>")
+	io.WriteString(w, "</div>")
+
+	io.WriteString(w, "</body>")
+	io.WriteString(w, "</html>")
+
+}
+
 func main() {
 	go periodicFree()
 	go readDhcp()
-	readHostAp()
+	go readHostAp()
+
+	http.HandleFunc("/", hello)
+	http.ListenAndServe(":3000", nil)
 }
